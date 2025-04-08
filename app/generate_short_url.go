@@ -22,6 +22,11 @@ func getShortUrlHandler(context *gin.Context){
 	})
 }
 
+/*
+核心模块：短链生成
+
+
+*/
 func generateShortUrl(longUrl string) string{
 	return longUrl
 }
