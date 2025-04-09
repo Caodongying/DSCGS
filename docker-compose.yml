@@ -6,6 +6,10 @@ services:
       - 6379:6379
     volumes:
       - ./conf/redis.conf:/usr/local/etc/redis/redis.conf
+      - redis_data:/data
     command: redis-server /usr/local/etc/redis/redis.conf
 
-    # TODO: 将redis内部的data，绑定到docker volume来实现数据持久化
+
+# 将redis内部的data，绑定到docker volume来实现数据持久化
+volumes:
+  redis_data:
