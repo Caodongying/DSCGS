@@ -20,6 +20,17 @@ type getShortUrlRequest struct {
 	// 需要json标签是表明结构体中的Url是和JSON数据中的url绑定，注意两者大小写不一样，不写标签就无法完全匹配
 }
 
+func getShortUrl(longUrl string) (bool, string){
+	// 检查是否已经为初始的长链生成的短链
+	// 1. 查询布隆过滤器，如果不存在就直接返回空串
+
+	// 2. 访问Redis，若命中，直接返回短链
+
+	// 3. 访问MySQL，若命中，写如Redis，并返回
+
+	// 4. 若MySQL不命中，就生成
+	return false, ""
+}
 func getShortUrlHandler(context *gin.Context){
 	// 1. 解析请求参数
 	var request getShortUrlRequest
@@ -27,8 +38,17 @@ func getShortUrlHandler(context *gin.Context){
 		panic("参数有误")
 	}
 
-	// 2. 生成短链
-	shortUrl := generateShortUrl(request.Url)
+	longUrl := request.Url
+	shortUrl := ""
+	// 2. 检查是否已经为此长链生成了短链
+	if hasGenerated, shortUrl := getShortUrl(longUrl); hasGenerated {
+		context.JSON(200, gin.H{
+			"shorturl": shortUrl,
+		})
+	}
+
+	// 3. 生成短链
+	shortUrl = generateShortUrl(longUrl)
 
 
 	// TODO: 检查（长链，短链）是否存在 看使用布隆过滤器（涉及何时构建和更新的问题），还是查Redis，还是MySQL
@@ -61,9 +81,9 @@ func generateShortUrl(longUrl string) string{
 	// 获取自增ID，并进行Base62编码
 	id := int(redisDb.Incr(context, "id").Val())
 	id62 := utils.DecimalTo62(id)
-	
+
 	// 加盐，避免其他短链被解码猜到
-	suffixHash := md5.Sum([]byte(fmt.Sprintf("%s%d", longUrl,time.Now().Unix()))) 
+	suffixHash := md5.Sum([]byte(fmt.Sprintf("%s%d", longUrl,time.Now().Unix())))
 	suffixString := fmt.Sprintf("%x", suffixHash) // 将[16]byte数组（16个二进制数）转为16进制
 	suffix := suffixString[:5] // 取前5位，左开右闭
 
