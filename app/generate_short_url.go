@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 
 )
 
@@ -24,14 +25,31 @@ type getShortUrlRequest struct {
 func getShortUrl(longUrl string) (bool, string){
 	// 检查是否已经为初始的长链生成的短链
 	// 1. 查询布隆过滤器，如果不存在就直接返回空串
+	if !IsInBloomFilter(longUrl) {
+		return false, ""
+	}
 
 	// 2. 访问Redis，若命中，直接返回短链
+	redisClient := myredis.GetRedisClient()
+	keyLongUrl := "long:" + longUrl
+	result, err := redisClient.Get(context.Background(), keyLongUrl).Result()
+	if err == redis.Nil {
+		// keyLongUrl不存在
+		fmt.Println("keyLongUrl不存在于Redis中", err)
+	} else if err != nil {
+		// 其他错误
+		fmt.Println("Redis访问出错", err)
+	} else {
+		// err为空，key存在
+		return true, result
+	}
 
 	// 3. 访问MySQL，若命中，写如Redis，并返回
 
 	// 4. 若MySQL不命中，就生成
 	return false, ""
 }
+
 func getShortUrlHandler(context *gin.Context){
 	// 1. 解析请求参数
 	var request getShortUrlRequest
@@ -41,6 +59,7 @@ func getShortUrlHandler(context *gin.Context){
 
 	longUrl := request.Url
 	shortUrl := ""
+
 	// 2. 检查是否已经为此长链生成了短链
 	if hasGenerated, shortUrl := getShortUrl(longUrl); hasGenerated {
 		context.JSON(200, gin.H{

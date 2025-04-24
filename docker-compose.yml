@@ -9,7 +9,10 @@ services:
       - redis_data:/data
     command: redis-server /usr/local/etc/redis/redis.conf
 
-
+  mysql:
+    image:
+    container_name: mysql
+    
 # 将redis内部的data，绑定到docker volume来实现数据持久化
 volumes:
   redis_data:
