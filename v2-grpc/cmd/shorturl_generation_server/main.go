@@ -6,8 +6,13 @@ import (
 	"context"
 	"log"
 	"net"
+	"gorm.io/gorm"
 	redis "dscgs/v2-grpc/utils/redis"
+	database "dscgs/v2-grpc/utils/database"
+	model "dscgs/v2-grpc/model"
 )
+
+var db *gorm.DB
 
 type generationServer struct {
 	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
@@ -37,6 +42,8 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 		filterName := "GeneratedOriginalUrlBF"
 		if exists = redisUtils.BFExists(filterName, originalUrl); exists {
 			// 布隆过滤器里存在当前长链，访问MySQL
+			var mapping model.URLMapping
+			result = db.Where("original_url = ?", originalUrl).First(&mapping)
 
 		} else {
 			// 布隆过滤器里不存在当前长链，则数据库中也必然不存在长链信息
@@ -75,4 +82,7 @@ func main() {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("Generation server failed to serve: %v", err)
 	}
+
+	// 连接到数据库
+	db = database.GetDBConnection()
 }
