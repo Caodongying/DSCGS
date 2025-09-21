@@ -1,0 +1,22 @@
+// 短链生成服务
+syntax = "proto3";
+
+option go_package = ".;shorturl_generation_service";
+
+package server;
+
+service ShortURLGenerationService {
+    rpc GenerateShortURL(GenerateShortURLRequest) returns (GenerateShortURLResponse);
+}
+
+message GenerateShortURLRequest {
+    string original_url = 1; // 原始长链接
+}
+
+message GenerateShortURLResponse {
+    string short_url = 1; // 生成的短链接
+}
+
+// protoc   --go_out=./shorturl_generation_service --go_opt=paths=source_relative \
+//  --go-grpc_out=./shorturl_generation_service --go-grpc_opt=paths=source_relative \
+//  shorturl_generation_service.proto
