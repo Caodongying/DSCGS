@@ -3,8 +3,9 @@ package redis
 import (
 	"context"
 	"log"
-
+	"time"
 	redis "github.com/redis/go-redis/v9"
+	"math/rand"
 )
 
 // TODO: 重构，client连接池？
@@ -48,15 +49,24 @@ func (re *RedisUtils) GetKey(key string) (value any, exists bool) {
 	return result, true
 }
 
-// 👇🏻 将某个键值对加入Redis(值为string)
-// TODO：加入过期时间
-func (re *RedisUtils) AddKey(key string, value string) {
+// 👇🏻 将某个键值对加入Redis(值为string)，并设置过期时间
+func (re *RedisUtils) AddKeyEx(key string, value string, duration float64) {
 	client := re.GetRedisClient()
-	result := client.SAdd(context.Background(), key, value)
+	// 为了防止缓存雪崩，生成一个1-3之间的随机数
+	var randExtraTime float64 = 0
+	if duration != 0 {
+		randExtraTime = rand.Float64()*2 + 1
+	}
+	result := client.Set(context.Background(), key, value, time.Duration(duration+randExtraTime)*time.Hour)
 	if result.Err() != nil {
 		log.Fatalf("无法向Redis中添加键值对: %v, %v", key, value)
 		panic(result.Err())
 	}
+}
+
+// 👇🏻 将某个键值对加入Redis(值为string)，无过期时间
+func (re *RedisUtils) AddKey(key string, value string) {
+	re.AddKeyEx(key, value, 0)
 }
 
 // 👇🏻 判断某个键是否已经过期
