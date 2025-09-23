@@ -7,10 +7,9 @@ import (
 	"dscgs/v2-grpc/model"
 )
 
+var DB *gorm.DB
 
-
-func GetDBConnection() *gorm.DB {
-	var DB *gorm.DB
+func Init() {
 	dsn := "username:password@tcp(127.0.0.1:3306)/dbname?charset=utf8mb4&parseTime=True&loc=Local" // data source name
 	var err error
 	DB, err = gorm.Open(mysql.Open(dsn), &gorm.Config{}) // 可以设置慢查询日志等
@@ -23,5 +22,4 @@ func GetDBConnection() *gorm.DB {
 	if err := DB.AutoMigrate(&model.URLMapping{}); err != nil {
 		log.Fatalf("无法创建URLMapping表: %v", err)
 	}
-	return DB
 }

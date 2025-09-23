@@ -15,7 +15,7 @@ type RedisUtils struct {
 
 func (re *RedisUtils) GetRedisClient() *redis.Client{
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: re.serverAddr,
+		Addr: re.ServerAddr,
 		Password: "", //暂时还没有设置密码
 		DB: 0, //使用默认DB
 	})
@@ -48,6 +48,16 @@ func (re *RedisUtils) GetKey(key string) (value any, exists bool) {
 	return result, true
 }
 
+// 👇🏻 将某个键值对加入Redis(值为string)
+// TODO：加入过期时间
+func (re *RedisUtils) AddKey(key string, value string) {
+	client := re.GetRedisClient()
+	result := client.SAdd(context.Background(), key, value)
+	if result.Err() != nil {
+		log.Fatalf("无法向Redis中添加键值对: %v, %v", key, value)
+		panic(result.Err())
+	}
+}
 
 // 👇🏻 判断某个键是否已经过期
 func (re *RedisUtils) IsExpired(key string) bool {

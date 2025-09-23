@@ -1,18 +1,21 @@
 package main
 
 import (
-	"google.golang.org/grpc"
-	pb_gen "dscgs/v2-grpc/service/shorturl_generation_service"
 	"context"
+	model "dscgs/v2-grpc/model"
+	pb_gen "dscgs/v2-grpc/service/shorturl_generation_service"
+	database "dscgs/v2-grpc/utils/database"
+	redis "dscgs/v2-grpc/utils/redis"
+	"errors"
 	"log"
 	"net"
+	"time"
+
+	"google.golang.org/grpc"
 	"gorm.io/gorm"
-	redis "dscgs/v2-grpc/utils/redis"
-	database "dscgs/v2-grpc/utils/database"
-	model "dscgs/v2-grpc/model"
 )
 
-var db *gorm.DB
+var db *gorm.DB = database.DB
 
 type generationServer struct {
 	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
@@ -30,8 +33,8 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 		// ------- Redis里已经存有当前长链的信息 -------
 		// 检查短链是否过期
 		if isExpired := redisUtils.IsExpired(key); isExpired {
-			// 短链已经过期
-			shortUrl = createShortURL(originalUrl)
+			// 短链已经过期，则查询数据库
+			// TODO
 		} else {
 			shortUrl = result.(string) // 类型断言，将any类型的result转换为string
 		}
@@ -41,9 +44,31 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 		// 检查布隆过滤器
 		filterName := "GeneratedOriginalUrlBF"
 		if exists = redisUtils.BFExists(filterName, originalUrl); exists {
-			// 布隆过滤器里存在当前长链，访问MySQL
+			// 布隆过滤器里存在当前长链，访问MySQL，看长链是否存在+是否已经过期
 			var mapping model.URLMapping
-			result = db.Where("original_url = ?", originalUrl).First(&mapping)
+			dbError := db.Where("original_url = ?", originalUrl).First(&mapping).Error
+			if errors.Is(dbError, gorm.ErrRecordNotFound){
+				// 数据库中不存在当前长链
+				log.Println("查询不到长链%v", originalUrl)
+				shortUrl = createShortURL(originalUrl)
+			} else if dbError != nil {
+				log.Fatalf("数据库查询失败: %v", dbError)
+				panic(dbError)
+			} else{
+				// 数据库中存在当前长链，需要检查是否过期
+				expireTime := mapping.ExpireAt
+				if expireTime.After(time.Now()) {
+					// 数据库中的短链已经过期
+					shortUrl = createShortURL(originalUrl)
+				} else {
+					// 数据库中的短链没有过期
+					// 更新Redis，添加当前长短链对应关系
+					redisUtils.AddKey("long:"+originalUrl, shortUrl)
+					redisUtils.AddKey("short:"+shortUrl, originalUrl)
+					shortUrl = mapping.ShortUrl
+				}
+			}
+
 
 		} else {
 			// 布隆过滤器里不存在当前长链，则数据库中也必然不存在长链信息
