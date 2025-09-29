@@ -2,6 +2,6 @@ package main
 
 import ("dscgs/app")
 
-func main(){
-	app.StartServer()
-}
+// func main(){
+// 	app.StartServer()
+// }
