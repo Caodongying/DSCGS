@@ -1,8 +1,7 @@
-package main
+package archive
 
 import (
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
@@ -11,22 +10,16 @@ import (
 // 当新的毫秒到来，需要将序列号置0吗，还是继续分发序列号，直到达到4096、需要等待下一个序列号
 
 const (
-	// TODO: 改成12
-	sequenceBits int64 = 3 // 应该是uint8
+	sequenceBits int64 = 12 // 应该是uint8
 	workerIDBits int64 = 10
-	maxSequenceNumber int64 = 1 << sequenceBits - 1// 一毫秒内一共可以分配的序列号数量
-	// 下面不对，因为^在Go语言里不是幂运算符，而是按位异或运算符，同0异1，结果是14
-	// maxSequenceNumber int64 = 2 ^ sequenceBits // 一毫秒内一共可以分配的序列号数量
-
-	// 二进制里，表示正数的负数，是取反再加1，比如111111（若干1）就是-1
-	maxWorker int64 = 1 << workerIDBits // 应该是 -1 ^ (-1<<workerIDBits)
+	maxSequenceNumber int64 = 1 << sequenceBits - 1 // 一毫秒内一共可以分配的序列号数量
+	maxWorker int64 = 1 << workerIDBits - 1// 应该是 -1 ^ (-1<<workerIDBits)
 
 	workerIDShift int64 = sequenceBits
 	timestampShift int64 = workerIDShift + workerIDBits
-
 )
 
-var startTime int64 = time.Date(2025, 9, 29, 0, 0, 0, 0, time.UTC).Unix()
+var startTime int64 = time.Date(2025, 9, 29, 0, 0, 0, 0, time.UTC).UnixMilli()
 
 type Worker struct {
 	mu sync.Mutex
@@ -55,8 +48,7 @@ func (worker *Worker) GetID() int64 {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 
-	currentTimeStamp := int64(time.Now().Unix()) - startTime
-	fmt.Printf("Current timestamp is %064b\n", currentTimeStamp)
+	currentTimeStamp := time.Now().UnixMilli() - startTime
 	if currentTimeStamp == worker.lastAssignTimeStamp {
 		// 和上次分配在同一毫秒内发生
 		if worker.count < maxSequenceNumber {
@@ -65,7 +57,7 @@ func (worker *Worker) GetID() int64 {
 		} else {
 			// 当前毫秒内序列号已经用完,等待下一个毫秒到来
 			for currentTimeStamp !=  worker.lastAssignTimeStamp + 1 {
-				currentTimeStamp = int64(time.Now().Unix()) - startTime
+				currentTimeStamp = time.Now().UnixMilli() - startTime
 			}
 			worker.count = 0
 		}
@@ -80,20 +72,4 @@ func (worker *Worker) GetID() int64 {
 	worker.lastAssignTimeStamp = currentTimeStamp
 
 	return id
-}
-
-func main() {
-	worker, err := NewWorker(1)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println("maxSequenceNumber is ", maxSequenceNumber)
-	fmt.Println("maxWorker is ", maxWorker)
-	fmt.Println("timestampShift is ", timestampShift)
-
-	for i:=0; i<100; i++{
-		fmt.Printf("%019b\n", worker.GetID()) // worker不用解引用吗
-	}
-
 }

@@ -7,6 +7,8 @@ import (
 	database "dscgs/v2-grpc/utils/database"
 	redisutil "dscgs/v2-grpc/utils/redis"
 	redis "github.com/redis/go-redis/v9"
+	idgenerator "dscgs/v2-grpc/utils/idgenerator"
+	number "dscgs/v2-grpc/utils/number"
 	"errors"
 	"log"
 	"net"
@@ -116,7 +118,7 @@ func createShortURL(originalUrl string) (shortUrl string) {
 
 		// 利用雪花算法，生成64位id，并编码为62进制，取7位，并在首位添加1位库号，末尾添加1位表号
 		snowFlakeID := getSnowflakeID()
-		snowFlakeID62 := convertStringToBase62(snowFlakeID, 7)
+		snowFlakeID62 := number.DecimalToBase62(snowFlakeID, 7)
 		shortUrl = formIDToShortUrl(snowFlakeID62, 1, 1)
 
 		// 将长短链映射关系写入数据库，根据短链唯一索引，检查是否已经存在短链，是否需要重新生成
@@ -130,16 +132,21 @@ func createShortURL(originalUrl string) (shortUrl string) {
 
 // 用雪花算法生成id
 func getSnowflakeID() int64 {
-	return 0
+	// 假设当前是workerID=1的机器
+	workerID := 1
+	worker, err := idgenerator.NewWorker(int64(workerID))
+	if err != nil {
+		log.Fatalf("创建worker失败: %v", err)
+		panic(err)
+	}
+	snowflakeID := worker.GetID()
+	return snowflakeID
 }
 
-// 对id进行62进制编码，并且长度为length
-func convertStringToBase62(id int64, length int) (str62 string) {
-	return str62
-}
 
-// 在编码后的id前后添加库号和表号，库位数和表位数指定
+// 在编码后的id前后添加库号和表号，库位数和表位数指定，用于分库分表
 func formIDToShortUrl(str62 string, lenDB int, lenTable int) (shortUrl string) {
+	// 使用一致性哈希算法，计算库号和表号
 	return shortUrl
 }
 

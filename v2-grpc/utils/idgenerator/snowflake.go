@@ -10,14 +10,16 @@ import (
 // 当新的毫秒到来，需要将序列号置0吗，还是继续分发序列号，直到达到4096、需要等待下一个序列号
 
 const (
-	sequenceBits int64 = 12 // 应该是uint8
-	workerIDBits int64 = 10
-	maxSequenceNumber int64 = 2 ^ sequenceBits - 1 // 一毫秒内一共可以分配的序列号数量
-	maxWorker int64 = 2 ^ workerIDBits // 应该是 -1 ^ (-1<<workerIDBits)
+	sequenceBits uint8 = 12
+	workerIDBits uint8 = 10
+	maxSequenceNumber int64 = -1 ^ (-1 << sequenceBits) // 一毫秒内一共可以分配的序列号数量
+	maxWorker int64 = -1 ^ (-1 << workerIDBits) // 应该是 -1 ^ (-1<<workerIDBits)
 
-	workerIDShift int64 = sequenceBits
-	timestampShift int64 = workerIDShift + workerIDBits
+	workerIDShift uint8 = sequenceBits
+	timestampShift uint8 = workerIDShift + workerIDBits
 )
+
+var startTime int64 = time.Date(2025, 9, 29, 0, 0, 0, 0, time.UTC).UnixMilli()
 
 type Worker struct {
 	mu sync.Mutex
@@ -26,7 +28,7 @@ type Worker struct {
 	count int64 // 在当前毫秒内已经分发的ID数
 }
 
-func NewWorker(workerID int64) (*Worker, error) { // int和int64区别在哪
+func NewWorker(workerID int64) (*Worker, error) {
 	if workerID >= maxWorker {
 		return nil, errors.New("超出最大worker限制")
 	}
@@ -46,7 +48,7 @@ func (worker *Worker) GetID() int64 {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 
-	currentTimeStamp := time.Now().UnixMilli()
+	currentTimeStamp := time.Now().UnixMilli() - startTime
 	if currentTimeStamp == worker.lastAssignTimeStamp {
 		// 和上次分配在同一毫秒内发生
 		if worker.count < maxSequenceNumber {
@@ -55,7 +57,7 @@ func (worker *Worker) GetID() int64 {
 		} else {
 			// 当前毫秒内序列号已经用完,等待下一个毫秒到来
 			for currentTimeStamp !=  worker.lastAssignTimeStamp + 1 {
-				currentTimeStamp = time.Now().UnixMilli()
+				currentTimeStamp = time.Now().UnixMilli() - startTime
 			}
 			worker.count = 0
 		}
@@ -65,7 +67,8 @@ func (worker *Worker) GetID() int64 {
 	}
 
 	// 开始拼接ID
-	id := currentTimeStamp << timestampShift | worker.workerID << workerIDShift | worker.count // currentTimeStamp-startTime，为什么
+	var id int64
+	id = currentTimeStamp << timestampShift | worker.workerID << workerIDShift | worker.count
 
 	worker.lastAssignTimeStamp = currentTimeStamp
 
