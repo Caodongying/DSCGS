@@ -40,7 +40,7 @@ type HashRing struct {
 	sortedHashes []int64 // 哈希环上虚拟节点的哈希值，排序后用于查找
 }
 
-func (hr *HashRing) NewHashRing(length int64) *HashRing {
+func NewHashRing(length int64) *HashRing {
 	return &HashRing{
 		length: length,
 		// 需要初始化吗？

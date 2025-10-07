@@ -9,6 +9,7 @@ import (
 	redis "github.com/redis/go-redis/v9"
 	idgenerator "dscgs/v2-grpc/utils/idgenerator"
 	number "dscgs/v2-grpc/utils/number"
+	ch "dscgs/v2-grpc/utils/consistenthash"
 	"errors"
 	"log"
 	"net"
@@ -23,7 +24,39 @@ var db *gorm.DB = database.DB
 // 用62进制的1位来表示库号，1位表示表号，因此库号数组和表号数据的元素值都只能是数字或者字母（string形式）
 var dbIDs []string = []string{"a", "b"} // 两个库
 var tableIDs []string = []string{"j", "k"} // 两个表
+var hashringDB *ch.HashRing
+var hashringDBTable *ch.HashRing
 
+func init() {
+	// 初始化哈希环，库和表各有一个哈希环
+	hashringDB = ch.NewHashRing(1<<32) // 哈希环长度2的32次方
+	// 初始化数据库物理节点
+	dbNode1 := &ch.PhysicalServerNode{
+		Node: ch.Node{Name: dbIDs[0]},
+		Weight: ch.WEIGHT_2,
+	}
+	dbNode2 := &ch.PhysicalServerNode{
+		Node: ch.Node{Name: dbIDs[1]},
+		Weight: ch.WEIGHT_DEFAULT,
+	}
+	hashringDB.AddPhysicalServerNode(dbNode1)
+	hashringDB.AddPhysicalServerNode(dbNode2)
+
+	hashringDBTable = ch.NewHashRing(1<<32)
+
+	// 初始化表物理节点
+	tableNode1 := &ch.PhysicalServerNode{
+		Node: ch.Node{Name: tableIDs[0]},
+		Weight: ch.WEIGHT_DEFAULT,
+	}
+	tableNode2 := &ch.PhysicalServerNode{
+		Node: ch.Node{Name: tableIDs[1]},
+		Weight: ch.WEIGHT_2,
+	}
+	hashringDBTable.AddPhysicalServerNode(tableNode1)
+	hashringDBTable.AddPhysicalServerNode(tableNode2)
+
+}
 
 type generationServer struct {
 	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
@@ -119,7 +152,8 @@ func createShortURL(originalUrl string) (shortUrl string) {
 		// 利用雪花算法，生成64位id，并编码为62进制，取7位，并在首位添加1位库号，末尾添加1位表号
 		snowFlakeID := getSnowflakeID()
 		snowFlakeID62 := number.DecimalToBase62(snowFlakeID, 7)
-		shortUrl = formIDToShortUrl(snowFlakeID62, 1, 1)
+		var dbID, tableID string
+		shortUrl, dbID, tableID = formIDToShortUrl(snowFlakeID62, 1, 1)
 
 		// 将长短链映射关系写入数据库，根据短链唯一索引，检查是否已经存在短链，是否需要重新生成
 	} else {
@@ -145,9 +179,13 @@ func getSnowflakeID() int64 {
 
 
 // 在编码后的id前后添加库号和表号，库位数和表位数指定，用于分库分表
-func formIDToShortUrl(str62 string, lenDB int, lenTable int) (shortUrl string) {
+func formIDToShortUrl(str62 string, lenDB int, lenTable int) (shortUrl string, dbID string, tableID string) {
+	// 计算库号和表号
+	dbID = hashringDB.GetNode(str62).Name // 这里的Name就是id
+	tableID = hashringDBTable.GetNode(str62).Name
 	// 使用一致性哈希算法，计算库号和表号
-	return shortUrl
+	shortUrl = dbID + str62 + tableID
+	return shortUrl, dbID, tableID
 }
 
 func main() {
