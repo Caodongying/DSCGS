@@ -69,6 +69,16 @@ func (re *RedisUtils) AddKey(key string, value string) {
 	re.AddKeyEx(key, value, 0)
 }
 
+// 👇🏻 删除某个键
+func (re *RedisUtils) DeleteKey(key string) {
+	client := re.GetRedisClient()
+	_, err := client.Del(context.Background(), key).Result()
+	if err != nil {
+		log.Fatalf("无法删除Redis中的键: %v", err)
+		panic(err)
+	}
+}
+
 // 👇🏻 判断某个键是否已经过期
 func (re *RedisUtils) IsExpired(key string) bool {
 	client := re.GetRedisClient()

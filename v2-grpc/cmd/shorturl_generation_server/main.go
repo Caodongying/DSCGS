@@ -75,6 +75,9 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 		// 检查短链是否过期
 		if isExpired := redisUtils.IsExpired(key); isExpired {
 			// 短链已经过期，则查询数据库
+			// 删除Redis中已经过期的短链
+			shortUrlKey := "short:" + result.(string)
+			redisUtils.DeleteKey(shortUrlKey)
 			shortUrl = getShortUrlFromDB(originalUrl, &redisUtils)
 		} else {
 			shortUrl = result.(string) // 类型断言，将any类型的result转换为string
@@ -152,14 +155,62 @@ func createShortURL(originalUrl string) (shortUrl string) {
 		// 利用雪花算法，生成64位id，并编码为62进制，取7位，并在首位添加1位库号，末尾添加1位表号
 		snowFlakeID := getSnowflakeID()
 		snowFlakeID62 := number.DecimalToBase62(snowFlakeID, 7)
-		var dbID, tableID string
-		shortUrl, dbID, tableID = formIDToShortUrl(snowFlakeID62, 1, 1)
+		shortUrl = formIDToShortUrl(snowFlakeID62, 1, 1)
 
 		// 将长短链映射关系写入数据库，根据短链唯一索引，检查是否已经存在短链，是否需要重新生成
+		mapping := model.URLMapping{
+			OriginalUrl: originalUrl,
+			ShortUrl: shortUrl,
+			ExpireAt: time.Now().Add(24 * time.Hour), // 24小时后过期
+			AccessCount: 0,
+		}
+		dbError := db.Create(&mapping).Error
+		if dbError != nil {
+			// 插入失败，可能是短链重复了
+			log.Printf("插入长短链映射关系失败，可能是短链重复，错误信息: %v", dbError)
+			shortUrl = createShortURL(originalUrl) // 递归调用，重新生成短链
+		} else {
+			// 插入成功
+			log.Printf("插入长短链映射关系成功，长链: %v, 短链: %v", originalUrl, shortUrl)
+			// 将当前长短链对应关系写入布隆过滤器和Redis
+			filterName := "GeneratedOriginalUrlBF"
+			redisUtils.BFAdd(filterName, originalUrl)
+			// 设置24小时的基础默认过期时间
+			redisUtils.AddKeyEx("long:"+originalUrl, shortUrl, 24)
+			redisUtils.AddKeyEx("short:"+shortUrl, originalUrl, 24)
+		}
 	} else {
 		// 当前goroutine没有获取到分布式锁
-	}
+		// 挂起，等待一个timeout，如果timeout结束前还没有等到锁的释放信息，就返回空，提示无法分享，稍后再试。如果等到了，就再查一下Redis。
+		timeout := time.After(1 * time.Second)
+		ticker := time.NewTicker(100 * time.Millisecond)
 
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <- timeout:
+				log.Printf("等待分布式超时，长链：%v", originalUrl)
+				return ""
+			case <- ticker.C:
+				// 检查锁是否已经释放
+				lockExists, err := redisClient.Exists(context.Background(), keyLock).Result()
+				if err != nil {
+					log.Fatalf("检查锁状态失败: %v", err)
+					// return ""
+				}
+				if lockExists == 0 {
+					// 锁已经释放，重新尝试获取短链
+					if existingShortUrl, err := redisClient.Get(context.Background(), "long:"+originalUrl).Result(); err == nil {
+						log.Printf("等待后获取到已经存在的短链：%v", existingShortUrl)
+						return existingShortUrl
+					}
+				// 重新尝试生成短链
+				return createShortURL(originalUrl)
+				}
+			}
+		}
+	}
 
 	return ""
 }
@@ -179,13 +230,13 @@ func getSnowflakeID() int64 {
 
 
 // 在编码后的id前后添加库号和表号，库位数和表位数指定，用于分库分表
-func formIDToShortUrl(str62 string, lenDB int, lenTable int) (shortUrl string, dbID string, tableID string) {
+func formIDToShortUrl(str62 string, lenDB int, lenTable int) (shortUrl string) {
 	// 计算库号和表号
-	dbID = hashringDB.GetNode(str62).Name // 这里的Name就是id
-	tableID = hashringDBTable.GetNode(str62).Name
+	dbID := hashringDB.GetNode(str62).Name // 这里的Name就是id
+	tableID := hashringDBTable.GetNode(str62).Name
 	// 使用一致性哈希算法，计算库号和表号
 	shortUrl = dbID + str62 + tableID
-	return shortUrl, dbID, tableID
+	return shortUrl
 }
 
 func main() {
