@@ -2,6 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"log"
+	"net"
+	"time"
+
 	model "dscgs/v2-grpc/model"
 	pb_gen "dscgs/v2-grpc/service/shorturl_generation_service"
 	database "dscgs/v2-grpc/utils/database"
@@ -10,26 +15,47 @@ import (
 	idgenerator "dscgs/v2-grpc/utils/idgenerator"
 	number "dscgs/v2-grpc/utils/number"
 	ch "dscgs/v2-grpc/utils/consistenthash"
-	"errors"
-	"log"
-	"net"
-	"time"
 
 	"google.golang.org/grpc"
 	"gorm.io/gorm"
 )
 
-var db *gorm.DB = database.DB
+const (
+	defaultRedisAddr = "localhost:6379"
+	base62Length = 7
+	originalUrlKeyPrefix = "long:"
+	shortUrlKeyPrefix = "short:"
+	redisShortUrlExpireHours = 24 // 短链在Redis中的过期时间
+	distributedLockPrefix = "genlock:long:"
+	distributedLockTTL = 2 * time.Second
+	lockWaitTimeout = 1 * time.Second
+	lockPollInterval = 100 * time.Millisecond
+)
 
-// 用62进制的1位来表示库号，1位表示表号，因此库号数组和表号数据的元素值都只能是数字或者字母（string形式）
-var dbIDs []string = []string{"a", "b"} // 两个库
-var tableIDs []string = []string{"j", "k"} // 两个表
-var hashringDB *ch.HashRing
-var hashringDBTable *ch.HashRing
+var (
+	// 用62进制的1位来表示库号，1位表示表号，因此库号数组和表号数据的元素值都只能是数字或者字母（string形式）
+	dbIDs []string = []string{"a", "b"} // 两个库
+	tableIDs []string = []string{"j", "k"} // 两个表
+)
+
+type ServerConfig struct {
+	db *gorm.DB
+	hashringDB *ch.HashRing
+	hashringDBTable *ch.HashRing
+}
+
+type generationServer struct {
+	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
+	redisClient *redis.Client // 为什么要有*，但是cfg没有
+	cfg ServerConfig
+}
+
 
 func init() {
-	// 初始化哈希环，库和表各有一个哈希环
-	hashringDB = ch.NewHashRing(1<<32) // 哈希环长度2的32次方
+	// ------------------------------------------------------
+	//  初始化哈希环，库和表各有一个哈希环
+	// ------------------------------------------------------
+	hashringDB := ch.NewHashRing(1<<32) // 哈希环长度2的32次方
 	// 初始化数据库物理节点
 	dbNode1 := &ch.PhysicalServerNode{
 		Node: ch.Node{Name: dbIDs[0]},
@@ -42,7 +68,7 @@ func init() {
 	hashringDB.AddPhysicalServerNode(dbNode1)
 	hashringDB.AddPhysicalServerNode(dbNode2)
 
-	hashringDBTable = ch.NewHashRing(1<<32)
+	hashringDBTable := ch.NewHashRing(1<<32)
 
 	// 初始化表物理节点
 	tableNode1 := &ch.PhysicalServerNode{
@@ -56,11 +82,20 @@ func init() {
 	hashringDBTable.AddPhysicalServerNode(tableNode1)
 	hashringDBTable.AddPhysicalServerNode(tableNode2)
 
+
+	// ------------------------------------------------------
+	//  读取数据库连接
+	// ------------------------------------------------------
+	cfg := ServerConfig{
+		db: database.DB,
+		hashringDB: hashringDB,
+		hashringDBTable: hashringDBTable,
+	}
+
+	
 }
 
-type generationServer struct {
-	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
-}
+
 
 func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.GenerateShortURLRequest) (*pb_gen.GenerateShortURLResponse, error) {
 	originalUrl := req.OriginalUrl
@@ -68,15 +103,15 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 	var err error = nil
 
 	// ------ 检查Redis是否已经存在生成的短链 ------
-	redisUtils := redisutil.RedisUtils{ServerAddr: "localhost:6379"}
-	key := "long:" + originalUrl
+	redisUtils := redisutil.RedisUtils{ServerAddr: defaultRedisAddr}
+	key := originalUrlKeyPrefix + originalUrl
 	if result, exists := redisUtils.GetKey(key); exists {
 		// ------- Redis里已经存有当前长链的信息 -------
 		// 检查短链是否过期
 		if isExpired := redisUtils.IsExpired(key); isExpired {
 			// 短链已经过期，则查询数据库
 			// 删除Redis中已经过期的短链
-			shortUrlKey := "short:" + result.(string)
+			shortUrlKey := shortUrlKeyPrefix + result.(string)
 			redisUtils.DeleteKey(shortUrlKey)
 			shortUrl = getShortUrlFromDB(originalUrl, &redisUtils)
 		} else {
@@ -110,7 +145,7 @@ func getShortUrlFromDB(originalUrl string, redisUtils *redisutil.RedisUtils) (sh
 		log.Printf("查询不到长链%v", originalUrl)
 		shortUrl = createShortURL(originalUrl)
 	} else if dbError != nil {
-		log.Fatalf("数据库查询失败: %v", dbError)
+		log.Fatalf("数据库查询失败: %v", dbError) // TODO: 这里有问题
 		panic(dbError)
 	} else{
 		// 数据库中存在当前长链，需要检查是否过期
@@ -120,9 +155,9 @@ func getShortUrlFromDB(originalUrl string, redisUtils *redisutil.RedisUtils) (sh
 			shortUrl = createShortURL(originalUrl)
 		} else {
 			// 数据库中的短链没有过期
-			// 更新Redis，添加当前长短链对应关系，设置1小时的基础默认过期时间
-			redisUtils.AddKeyEx("long:"+originalUrl, shortUrl, 1)
-			redisUtils.AddKeyEx("short:"+shortUrl, originalUrl, 1)
+			// 更新Redis，添加当前长短链对应关系，设置数据库中写定的过期时间
+			redisUtils.AddKeyEx(originalUrlKeyPrefix + originalUrl, shortUrl, time.Until(mapping.ExpireAt).Hours())
+			redisUtils.AddKeyEx(shortUrlKeyPrefix+shortUrl, originalUrl, time.Until(mapping.ExpireAt).Hours())
 			shortUrl = mapping.ShortUrl
 		}
 	}
@@ -134,9 +169,9 @@ func createShortURL(originalUrl string) (shortUrl string) {
 	redisUtils := redisutil.RedisUtils{ServerAddr: "localhost:6379"}
 	redisClient := redisUtils.GetRedisClient()
 	// 获取分布式锁
-	keyLock := "genlock:long:" + originalUrl
+	keyLock := distributedLockPrefix + originalUrl
 	valueLock := "" // uuid
-	ok, err := redisClient.SetNX(context.Background(), keyLock, valueLock, time.Duration(1)*time.Second).Result()
+	ok, err := redisClient.SetNX(context.Background(), keyLock, valueLock, distributedLockTTL).Result()
 	if err != nil {
 		log.Fatalf("获取分布式锁%v时产生错误: %v", keyLock, err)
 		panic(err)
@@ -154,14 +189,14 @@ func createShortURL(originalUrl string) (shortUrl string) {
 
 		// 利用雪花算法，生成64位id，并编码为62进制，取7位，并在首位添加1位库号，末尾添加1位表号
 		snowFlakeID := getSnowflakeID()
-		snowFlakeID62 := number.DecimalToBase62(snowFlakeID, 7)
+		snowFlakeID62 := number.DecimalToBase62(snowFlakeID, base62Length)
 		shortUrl = formIDToShortUrl(snowFlakeID62, 1, 1)
 
 		// 将长短链映射关系写入数据库，根据短链唯一索引，检查是否已经存在短链，是否需要重新生成
 		mapping := model.URLMapping{
 			OriginalUrl: originalUrl,
 			ShortUrl: shortUrl,
-			ExpireAt: time.Now().Add(24 * time.Hour), // 24小时后过期
+			ExpireAt: time.Now().Add(redisShortUrlExpireHours * time.Hour),
 			AccessCount: 0,
 		}
 		dbError := db.Create(&mapping).Error
@@ -175,15 +210,15 @@ func createShortURL(originalUrl string) (shortUrl string) {
 			// 将当前长短链对应关系写入布隆过滤器和Redis
 			filterName := "GeneratedOriginalUrlBF"
 			redisUtils.BFAdd(filterName, originalUrl)
-			// 设置24小时的基础默认过期时间
-			redisUtils.AddKeyEx("long:"+originalUrl, shortUrl, 24)
-			redisUtils.AddKeyEx("short:"+shortUrl, originalUrl, 24)
+			// 设置短链在Redis中的过期时间
+			redisUtils.AddKeyEx(originalUrlKeyPrefix +originalUrl, shortUrl, redisShortUrlExpireHours)
+			redisUtils.AddKeyEx(shortUrlKeyPrefix+shortUrl, originalUrl, redisShortUrlExpireHours)
 		}
 	} else {
 		// 当前goroutine没有获取到分布式锁
 		// 挂起，等待一个timeout，如果timeout结束前还没有等到锁的释放信息，就返回空，提示无法分享，稍后再试。如果等到了，就再查一下Redis。
-		timeout := time.After(1 * time.Second)
-		ticker := time.NewTicker(100 * time.Millisecond)
+		timeout := time.After(lockWaitTimeout)
+		ticker := time.NewTicker(lockPollInterval)
 
 		defer ticker.Stop()
 
@@ -201,7 +236,7 @@ func createShortURL(originalUrl string) (shortUrl string) {
 				}
 				if lockExists == 0 {
 					// 锁已经释放，重新尝试获取短链
-					if existingShortUrl, err := redisClient.Get(context.Background(), "long:"+originalUrl).Result(); err == nil {
+					if existingShortUrl, err := redisClient.Get(context.Background(), originalUrlKeyPrefix +originalUrl).Result(); err == nil {
 						log.Printf("等待后获取到已经存在的短链：%v", existingShortUrl)
 						return existingShortUrl
 					}
